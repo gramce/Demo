@@ -30,9 +30,8 @@ class MXModel(object):
         self.setup(*args, **kwargs)
 
     def save(self, fname):
-        #args_save = {key: v.asnumpy() for key, v in self.args.items()}
-        # with open(fname, 'w') as fout:
-        #    pickle.dump(args_save, fout)
+        with open(fname, 'w') as fout:
+            pickle.dump(self.param_blocks, fout)
         pass
 
     def load(self, fname):
@@ -99,19 +98,22 @@ class mymodel(MXModel):
             input_shape['lstm_init_decode_' + str(idx) + '_h'] = (batchsize, num_lstm_hidden)
         for decoded in decoded_list:
             out = mx.sym.FullyConnected(data=decoded,
+                                        num_hidden=picture_shape[0] * picture_shape[1] / 4,
+                                        name="deembeded_1")
+            out = mx.sym.Activation(out, act_type="relu")
+            out = mx.sym.FullyConnected(data=out,
                                         num_hidden=picture_shape[0] * picture_shape[1],
                                         name="deembeded_2")
             out = mx.sym.Activation(out, act_type="relu")
             outlist.append(out)
         cancat_out = mx.sym.Concat(*outlist, dim=1)
         final_out = mx.sym.LinearRegressionOutput(data=cancat_out, label=input_y, name='regression')
-        #final_out = mx.sym.LinearRegressionOutput(data=encoded, label=input_y, name='regression')
         #
         #zip(final_out.list_arguments(), final_out.infer_shape(**input_shape)[0])
         # return final_out, input_shape
         self.out_sym = final_out
-
         self.input_shape = input_shape
+        self.metric = mx.metric.MSE()
 
     def prepare(self, ctx=mx.cpu(), initializer=mx.initializer.Uniform(0.1)):
         # my_model, input_shape = self.setup(sentence_size, num_embed, batch_size=batch_size,
@@ -169,80 +171,46 @@ class mymodel(MXModel):
               epoch=200,
               eval_func=None):
         if eval_func is None:
-            eval_func = lambda x, y: np.std(x.asnumpy() - y.asnumpy())
+            eval_func = lambda x, y: np.mean(np.abs(x.asnumpy() - y.asnumpy())*10000)
 
-        #opt = mx.optimizer.create(optimizer)
-        #opt.lr = learning_rate
+        opt = mx.optimizer.create(optimizer)
+        opt.lr = learning_rate
 
-        #updater = mx.optimizer.get_updater(opt)
-        #edge = 100
-        #self.data = mx.nd.array(np.zeros((100,3*edge,edge)))
-            #label = mx.nd.array([images[idx + 4] for idx in range(200, 600)]).reshape((400, edge * edge))
-        #self.label = mx.nd.array(np.zeros((100,edge*edge)))
+        updater = mx.optimizer.get_updater(opt)
+
         for iteration in range(epoch):
-            tic = time.time()
 
             for begin in range(0, train_data.shape[0], batch_size):
+                tic = time.time()
                 batchX = train_data[begin:begin + batch_size]
                 batchY = train_label[begin:begin + batch_size]
 
                 if batchX.shape[0] != batch_size:
                     continue
 
-                print "data shape, ", self.data.shape
-                print "label shape, ", self.label.shape
-                print "input data shape, ", batchX.shape
-                print "input label shape, ", batchY.shape
-                batchX.copyto(self.data)
-                batchY.copyto(self.label)
-
+                self.data[:] = batchX
+                self.label[:] = batchY
+                forward_start_time = time.time()
                 self.mod_exec.forward(is_train=True)
+                print "iter_"+str(iteration) + "batch_" + str(begin / 100)+"forward_cost=" + str(time.time() - forward_start_time)
+                backward_start_time = time.time()
                 self.mod_exec.backward()
+                print "iter_"+str(iteration) + "batch_" + str(begin / 100)+"backward_cost=" + str(time.time() - backward_start_time)            
+                eval_time =time.time()
+                train_error = eval_func(self.mod_exec.outputs[0], self.label)
+                print "iter_"+str(iteration) + "batch_" + str(begin / 100)+"eval_time=" + str(time.time() - backward_start_time)
+                train_error = 0
 
-               # train_error = eval_func(self.mod_exec.outputs[0], self.label)
-		        train_error = 0
-
-                #norm = 0.0
-                #for idx, weight, grad, name in self.param_blocks:
-                #    grad /= batch_size
-                #    l2_norm = mx.nd.norm(grad).asscalar()
-                #    norm += l2_norm * l2_norm
-
-                #norm = math.sqrt(norm)
+                update_start_time = time.time()
                 for idx, weight, grad, name in self.param_blocks:
-                    if norm > max_grad_norm:
-                        grad *= (max_grad_norm / norm)
                     updater(idx, grad, weight)
                     grad[:] = 0.0
-
-                #if dev_data is not None and dev_label is not None:
-                #    for begin in range(0, dev_data.shape[0], batch_size):
-                #        batchX = dev_data[begin:begin + batch_size]
-                #        batchY = dev_label[begin:begin + batch_size]
-
-#                        if batchX.shape[0] != batch_size:
-#                            continue
-#
-#                        self.data = batchX
-#                        self.label = batchY
-#                        self.mod_exec.forward(is_train=False)
-#
-#                        dev_error = eval_func(self.mod_exec.outputs[0], self.label)
-		        dev_error = 0
-
-                #if iteration % 50 == 0 and iteration > 0:
-                #    opt.lr *= 0.5
-                #    logging.info("reset optimizer learning rate to {}".format(opt.lr))
-
+                
+                print "iter_"+str(iteration) + "batch_" + str(begin / 100)+"update_cost=" + str(time.time() - update_start_time)
+                dev_error = 0
                 toc = time.time()
                 train_time = toc - tic
-                logging.info("Iter {} Train: Time:{:.3f}s, Training Error:{:.3f} Dev Error:{:.3f}".format(iteration,
-                                                                                                          train_time,
-                                                                                                          train_error,
-                                                                                                          dev_error))
-	#if iteration % 50 == 0 & iteration > 0:
-    #            train_error = eval_func(self.mod_exec.outputs[0], self.label)
-	#	print train_error
+                print "iter_"+str(iteration) + "batch_" + str(begin / 100)+"total_train_cost=" + str(train_time)
 
 
 def lstm(num_hidden, indata, prev_state, seqidx, layeridx, dropout=0., attr='encode', not_h=False):
@@ -328,7 +296,7 @@ def lstm_decode(decoded_list, prev_state, num_lstm_layer, seq_len, num_hidden, d
     return decoded_list
 
 
-if __name__ == '__main__':
+def main():
     images = []
     with open('train-data', 'r') as train_data_file:
         for line in train_data_file:
@@ -336,11 +304,13 @@ if __name__ == '__main__':
             image = pickle.loads(base64.decodestring(line.strip().split('\t')[2]))
             images.append(image)
     edge = len(images[0])
-    #edge = 100
     data = mx.nd.array([images[idx] + images[idx + 1] + images[idx + 2] for idx in range(200, 600)])
-    #data = mx.nd.array(np.zeros((400,3*edge,edge)))
     label = mx.nd.array([images[idx + 4] for idx in range(200, 600)]).reshape((400, edge * edge))
-    #label = mx.nd.array(np.zeros((400,edge*edge)))
     mod = mymodel(picture_shape = (180, 180))
     mod.prepare()
     mod.train(train_data = data, train_label = label, dev_data = data, dev_label = label, batch_size = 100, epoch=10000)
+
+
+if __name__ == '__main__':
+    main()
+
